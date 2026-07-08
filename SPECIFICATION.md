@@ -7,6 +7,7 @@ This package keeps the Windows Codex Desktop session store and the WSL Codex CLI
 The intended installation paths are:
 
 - WSL script: `~/.codex/hooks/sync-codex-sessions.sh`
+- WSL reindex helper: `~/.codex/hooks/reindex-codex-sessions.mjs`
 - Windows wrapper: `%USERPROFILE%/.codex/hooks/sync-codex-sessions.cmd`
 - WSL hooks: `~/.codex/hooks.json`
 - Windows hooks: `%USERPROFILE%/.codex/hooks.json`
@@ -61,8 +62,11 @@ When the debounced runner wakes up, it checks that its token is still current. I
 A sync pass copies only these files from the source Codex home:
 
 - `sessions/**/*`
-- `session_index.jsonl`
-- `state_5.sqlite`
+- `archived_sessions/**/*`
+
+After session files are copied, `session_index.jsonl` is merged by session id. The merged file keeps the entry with the newest `updated_at` for each id and is written through a temporary file plus atomic rename.
+
+Runtime SQLite databases such as `state_5.sqlite`, `logs_*.sqlite`, and their WAL/SHM sidecars are never copied. They are owned by the local Codex install and may have version-specific migration metadata. After portable session files land, the target side reindexes missing `threads` rows inside its own local `state_5.sqlite`.
 
 Candidate files are collected only after the shared lock is acquired.
 
@@ -72,7 +76,7 @@ Files are sorted newest to oldest by mtime, then largest to smallest by size, th
 - source mtime is newer than destination mtime, or
 - source and destination have equal mtime and source is larger.
 
-Copies use `cp -p` so file timestamps are preserved where the filesystem supports it.
+Session copies use `cp -p` into a temporary file in the destination directory, followed by atomic rename, so readers never observe a partial destination file.
 
 ## Anti-Bounce Stamps
 
@@ -102,6 +106,19 @@ Entry points:
 - Windows uninstall: `uninstall.cmd`
 
 The Windows `.cmd` entry points call the WSL Bash scripts.
+
+## Version and Path Safety
+
+Before a sync pass touches files or databases, it compares the WSL and Windows `codex --version` values. If they differ, sync exits without copying or reindexing. The abort is quiet by default and only prints a reason when the script is run with `--debug`.
+
+Normal status messages are also quiet by default and are written to the sync log. Pass `--debug` to print status to the terminal.
+
+Each side stores native paths in its own SQLite rows:
+
+- WSL rows use POSIX paths, such as `/home/...` or `/mnt/c/...`.
+- Windows rows use Windows paths, such as `C:\...` or `\\wsl.localhost\...`.
+
+The sync converts `rollout_path`, `cwd`, and `agent_path` metadata when it reindexes or repairs local rows. Runtime SQLite files themselves are still never copied between platforms.
 
 Install behavior is idempotent:
 

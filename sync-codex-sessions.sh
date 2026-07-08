@@ -2,6 +2,7 @@
 set -uo pipefail
 
 SCRIPT_PATH="${BASH_SOURCE[0]}"
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
 
 log() {
   local level="$1"
@@ -165,7 +166,7 @@ cleanup() {
 trap cleanup EXIT
 
 emit_status() {
-  if [[ "$HOOK_MODE" == "1" && "$DEBUG_OUTPUT" != "1" ]]; then
+  if [[ "$DEBUG_OUTPUT" != "1" ]]; then
     log "INFO" "$1"
   else
     echo "$1"
@@ -250,6 +251,54 @@ hash_file() {
   sha256sum "$1" | awk '{print $1}'
 }
 
+extract_codex_version() {
+  sed -n 's/.*\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -n 1
+}
+
+local_codex_version() {
+  codex --version 2>/dev/null | tr -d '\r' | extract_codex_version
+}
+
+windows_codex_version() {
+  local powershell="/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+
+  if [[ -x "$powershell" ]]; then
+    "$powershell" -NoProfile -Command "codex --version" 2>/dev/null | tr -d '\r' | extract_codex_version
+    return 0
+  fi
+
+  return 1
+}
+
+debug_status() {
+  if [[ "$DEBUG_OUTPUT" == "1" ]]; then
+    emit_status "$1"
+  fi
+}
+
+require_matching_codex_versions() {
+  local wsl_version
+  local windows_version
+
+  wsl_version="$(local_codex_version || true)"
+  windows_version="$(windows_codex_version || true)"
+
+  if [[ -z "$wsl_version" || -z "$windows_version" ]]; then
+    log "WARN" "sync aborted: unable to compare Codex versions wsl=${wsl_version:-unknown} windows=${windows_version:-unknown}"
+    debug_status "sync aborted: unable to compare Codex versions (wsl=${wsl_version:-unknown}, windows=${windows_version:-unknown})"
+    return 1
+  fi
+
+  if [[ "$wsl_version" != "$windows_version" ]]; then
+    log "WARN" "sync aborted: Codex versions differ wsl=$wsl_version windows=$windows_version"
+    debug_status "sync aborted: Codex versions differ (wsl=$wsl_version, windows=$windows_version)"
+    return 1
+  fi
+
+  log "INFO" "Codex versions match: $wsl_version"
+  return 0
+}
+
 import_stamp_file() {
   printf '%s\n' "$1/.codex-session-sync.imports.tsv"
 }
@@ -292,13 +341,171 @@ collect_paths() {
     find "$root/sessions" -type f -print
   fi
 
-  if [[ -f "$root/session_index.jsonl" ]]; then
-    printf '%s\n' "$root/session_index.jsonl"
+  if [[ -d "$root/archived_sessions" ]]; then
+    find "$root/archived_sessions" -type f -print
+  fi
+}
+
+copy_file_atomic() {
+  local source_file="$1"
+  local dst_file="$2"
+  local dst_dir
+  local dst_name
+  local tmp_file
+
+  dst_dir="$(dirname "$dst_file")"
+  dst_name="$(basename "$dst_file")"
+
+  if ! mkdir -p "$dst_dir"; then
+    log "ERROR" "failed to create destination directory: $dst_dir"
+    return 1
   fi
 
-  if [[ -f "$root/state_5.sqlite" ]]; then
-    printf '%s\n' "$root/state_5.sqlite"
+  if ! tmp_file="$(mktemp "$dst_dir/.${dst_name}.sync.XXXXXX")"; then
+    log "ERROR" "failed to create temporary copy target in: $dst_dir"
+    return 1
   fi
+
+  if cp -p "$source_file" "$tmp_file" && mv -f "$tmp_file" "$dst_file"; then
+    return 0
+  fi
+
+  rm -f "$tmp_file" 2>/dev/null || true
+  log "ERROR" "failed to atomically copy $source_file -> $dst_file"
+  return 1
+}
+
+merge_session_index() {
+  local source_index="$SOURCE_HOME/session_index.jsonl"
+  local target_index="$TARGET_HOME/session_index.jsonl"
+  local target_dir
+  local tmp_file
+  local inputs=()
+  local merged_count
+
+  [[ -f "$target_index" ]] && inputs+=("$target_index")
+  [[ -f "$source_index" ]] && inputs+=("$source_index")
+
+  if [[ "${#inputs[@]}" -eq 0 ]]; then
+    log "SKIP" "session_index.jsonl missing on both sides"
+    echo "0"
+    return 0
+  fi
+
+  target_dir="$(dirname "$target_index")"
+  if ! mkdir -p "$target_dir"; then
+    log "ERROR" "failed to create session index directory: $target_dir"
+    echo "0"
+    return 1
+  fi
+
+  if ! tmp_file="$(mktemp "$target_dir/.session_index.jsonl.merge.XXXXXX")"; then
+    log "ERROR" "failed to create temporary session index in: $target_dir"
+    echo "0"
+    return 1
+  fi
+
+  awk '
+    /"id":"[^"]+"/ && /"updated_at":"[^"]+"/ {
+      id = $0
+      sub(/^.*"id":"/, "", id)
+      sub(/".*$/, "", id)
+
+      updated = $0
+      sub(/^.*"updated_at":"/, "", updated)
+      sub(/".*$/, "", updated)
+
+      if (!(id in seen)) {
+        order[++count] = id
+        seen[id] = 1
+      }
+
+      if (!(id in updated_by_id) || updated >= updated_by_id[id]) {
+        updated_by_id[id] = updated
+        line_by_id[id] = $0
+      }
+    }
+
+    END {
+      for (i = 1; i <= count; i++) {
+        id = order[i]
+        if (id in line_by_id) {
+          print updated_by_id[id] "\t" line_by_id[id]
+        }
+      }
+    }
+  ' "${inputs[@]}" | sort -t $'\t' -k1,1 | cut -f2- > "$tmp_file"
+
+  if [[ -f "$target_index" ]] && cmp -s "$tmp_file" "$target_index"; then
+    rm -f "$tmp_file"
+    log "SKIP" "already in-sync: session_index.jsonl"
+    echo "0"
+    return 0
+  fi
+
+  merged_count="$(wc -l < "$tmp_file" | tr -d ' ')"
+
+  if (( DRY_RUN == 1 )); then
+    rm -f "$tmp_file"
+    log "DRY" "merge session_index.jsonl entries=$merged_count"
+    echo "1"
+    return 0
+  fi
+
+  if mv -f "$tmp_file" "$target_index"; then
+    log "MERGE" "session_index.jsonl entries=$merged_count"
+    echo "1"
+    return 0
+  fi
+
+  rm -f "$tmp_file" 2>/dev/null || true
+  log "ERROR" "failed to replace merged session index: $target_index"
+  echo "0"
+  return 1
+}
+
+reindex_target_threads() {
+  local path_style="posix"
+  local result
+  local inserted
+  local args=("$SCRIPT_DIR/reindex-codex-sessions.mjs" "--codex-home" "$TARGET_HOME" "--repair-paths")
+
+  if [[ "$TARGET_HOME" == "$WINDOWS_HOME" ]]; then
+    path_style="windows"
+  fi
+
+  args+=("--path-style" "$path_style")
+
+  if (( DRY_RUN == 1 )); then
+    args+=("--dry-run")
+  fi
+
+  if ! command -v node >/dev/null 2>&1; then
+    log "WARN" "session reindex skipped: node is not available"
+    echo "0"
+    return 0
+  fi
+
+  if ! command -v sqlite3 >/dev/null 2>&1; then
+    log "WARN" "session reindex skipped: sqlite3 is not available"
+    echo "0"
+    return 0
+  fi
+
+  if ! result="$(node "${args[@]}" 2>>"$LOG_FILE")"; then
+    log "ERROR" "session reindex failed for target=$TARGET_HOME"
+    echo "0"
+    return 1
+  fi
+
+  inserted="${result##*inserted=}"
+  inserted="${inserted%% *}"
+  if [[ -z "$inserted" || "$inserted" == "$result" ]]; then
+    inserted="0"
+  fi
+
+  log "REINDEX" "$result"
+  echo "$inserted"
 }
 
 run_sync_pass() {
@@ -318,6 +525,8 @@ run_sync_pass() {
   local dst_size
   local copy_needed
   local reason
+  local index_merged=0
+  local reindexed=0
 
   tmp_source_paths="$(mktemp)"
   tmp_unsorted="$(mktemp)"
@@ -396,8 +605,10 @@ run_sync_pass() {
       if (( DRY_RUN == 1 )); then
         log "DRY" "copy $src_file_path -> $dst_file ($reason)"
       else
-        mkdir -p "$(dirname "$dst_file")"
-        cp -p "$src_file_path" "$dst_file"
+        if ! copy_file_atomic "$src_file_path" "$dst_file"; then
+          ((skipped++))
+          continue
+        fi
         record_import_stamp "$TARGET_HOME" "$rel_path" "$src_file_path" "$src_size"
         log "COPY" "$reason: $rel_path"
       fi
@@ -409,7 +620,9 @@ run_sync_pass() {
   done < "$tmp_sorted"
 
   rm -f "$tmp_source_paths" "$tmp_unsorted" "$tmp_sorted"
-  echo "$copied $skipped"
+  index_merged="$(merge_session_index)"
+  reindexed="$(reindex_target_threads)"
+  echo "$copied $skipped $index_merged $reindexed"
 }
 
 run_pending_sync() {
@@ -418,6 +631,8 @@ run_pending_sync() {
   local run_result
   local copied
   local skipped
+  local index_merged
+  local reindexed
 
   if [[ -z "$expected_token" ]]; then
     exit 0
@@ -446,9 +661,9 @@ run_pending_sync() {
 
   rm -f "$SIDE_PENDING_FILE" 2>/dev/null || true
   run_result="$(run_sync_pass)"
-  read -r copied skipped <<<"$run_result"
-  emit_status "pending sync completed: side=$SIDE mode=$MODE copied=$copied skipped=$skipped"
-  log "INFO" "pending sync completed: side=$SIDE mode=$MODE copied=$copied skipped=$skipped"
+  read -r copied skipped index_merged reindexed <<<"$run_result"
+  emit_status "pending sync completed: side=$SIDE mode=$MODE copied=$copied skipped=$skipped index_merged=$index_merged reindexed=$reindexed"
+  log "INFO" "pending sync completed: side=$SIDE mode=$MODE copied=$copied skipped=$skipped index_merged=$index_merged reindexed=$reindexed"
 }
 
 if [[ "$ACTION" == "cancel-pending" ]]; then
@@ -471,6 +686,11 @@ if [[ ! -d "$TARGET_HOME" ]]; then
   exit 2
 fi
 
+if ! require_matching_codex_versions; then
+  emit_stop_continue
+  exit 0
+fi
+
 if [[ "$ACTION" == "run-pending" ]]; then
   run_pending_sync
   exit 0
@@ -489,9 +709,9 @@ fi
 
 rm -f "$SIDE_PENDING_FILE" 2>/dev/null || true
 run_result="$(run_sync_pass)"
-read -r copied skipped <<<"$run_result"
+read -r copied skipped index_merged reindexed <<<"$run_result"
 
-emit_status "sync completed: side=$SIDE mode=$MODE copied=$copied skipped=$skipped"
-echo "$(date -Iseconds) [sync-end] side=$SIDE mode=$MODE copied=$copied skipped=$skipped" >> "$LOG_FILE"
+emit_status "sync completed: side=$SIDE mode=$MODE copied=$copied skipped=$skipped index_merged=$index_merged reindexed=$reindexed"
+echo "$(date -Iseconds) [sync-end] side=$SIDE mode=$MODE copied=$copied skipped=$skipped index_merged=$index_merged reindexed=$reindexed" >> "$LOG_FILE"
 emit_stop_continue
 exit 0

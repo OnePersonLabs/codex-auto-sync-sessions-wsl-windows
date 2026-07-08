@@ -78,6 +78,7 @@ remove_hooks "$WSL_CODEX_HOME/hooks.json"
 remove_hooks "$WINDOWS_CODEX_HOME/hooks.json"
 
 rm -f "$WSL_CODEX_HOME/hooks/sync-codex-sessions.sh"
+rm -f "$WSL_CODEX_HOME/hooks/reindex-codex-sessions.mjs"
 rm -f "$WINDOWS_CODEX_HOME/hooks/sync-codex-sessions.cmd"
 rm -f "$WINDOWS_CODEX_HOME/.codex-session-sync.lock."*.pending 2>/dev/null || true
 rm -f "$WSL_CODEX_HOME/sync-codex-sessions-readme.md"

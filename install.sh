@@ -32,14 +32,17 @@ WSL_HOOKS_DIR="$WSL_CODEX_HOME/hooks"
 WINDOWS_HOOKS_DIR="$WINDOWS_CODEX_HOME/hooks"
 
 WSL_SCRIPT="$WSL_HOOKS_DIR/sync-codex-sessions.sh"
+WSL_REINDEX_SCRIPT="$WSL_HOOKS_DIR/reindex-codex-sessions.mjs"
 WINDOWS_CMD="$WINDOWS_HOOKS_DIR/sync-codex-sessions.cmd"
 
 mkdir -p "$WSL_HOOKS_DIR" "$WINDOWS_HOOKS_DIR"
 cp -f "$REPO_DIR/sync-codex-sessions.sh" "$WSL_SCRIPT"
+cp -f "$REPO_DIR/reindex-codex-sessions.mjs" "$WSL_REINDEX_SCRIPT"
 cp -f "$REPO_DIR/sync-codex-sessions.cmd" "$WINDOWS_CMD"
 cp -f "$REPO_DIR/SPECIFICATION.md" "$WSL_CODEX_HOME/sync-codex-sessions-readme.md"
 cp -f "$REPO_DIR/SPECIFICATION.md" "$WINDOWS_CODEX_HOME/sync-codex-sessions-readme.md"
 chmod 755 "$WSL_SCRIPT"
+chmod 755 "$WSL_REINDEX_SCRIPT"
 
 install_hooks() {
   local hooks_file="$1"
