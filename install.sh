@@ -72,38 +72,53 @@ else:
 hooks = data.setdefault("hooks", {})
 
 def is_managed(hook):
+    if not isinstance(hook, dict):
+        return False
     return "sync-codex-sessions" in str(hook.get("command", ""))
 
-for event in list(hooks):
-    groups = []
+def managed_hook(command, timeout, status):
+    return {
+        "type": "command",
+        "command": command,
+        "timeout": timeout,
+        "statusMessage": status,
+    }
+
+def upsert_managed_hook(event, hook):
+    installed = False
+    next_groups = []
+
     for group in hooks.get(event, []):
-        kept = [hook for hook in group.get("hooks", []) if not is_managed(hook)]
-        if kept:
+        next_hooks = []
+        if not isinstance(group, dict):
+            next_groups.append(group)
+            continue
+        for existing in group.get("hooks", []):
+            if is_managed(existing):
+                if not installed:
+                    next_hooks.append(hook)
+                    installed = True
+                continue
+            next_hooks.append(existing)
+        if next_hooks:
             next_group = dict(group)
-            next_group["hooks"] = kept
-            groups.append(next_group)
-    if groups:
-        hooks[event] = groups
-    else:
-        hooks.pop(event, None)
+            next_group["hooks"] = next_hooks
+            next_groups.append(next_group)
 
-hooks.setdefault("Stop", []).append({
-    "hooks": [{
-        "type": "command",
-        "command": stop_command,
-        "timeout": 20,
-        "statusMessage": stop_status,
-    }]
-})
+    if not installed:
+        next_groups.append({"hooks": [hook]})
 
-hooks.setdefault("UserPromptSubmit", []).append({
-    "hooks": [{
-        "type": "command",
-        "command": cancel_command,
-        "timeout": 5,
-        "statusMessage": cancel_status,
-    }]
-})
+    hooks[event] = next_groups
+
+upsert_managed_hook(
+    "Stop",
+    managed_hook(stop_command, 20, stop_status),
+)
+
+upsert_managed_hook(
+    "UserPromptSubmit",
+    managed_hook(cancel_command, 20, cancel_status),
+)
 
 hooks_path.parent.mkdir(parents=True, exist_ok=True)
 hooks_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
@@ -112,14 +127,14 @@ PY
 
 install_hooks \
   "$WSL_CODEX_HOME/hooks.json" \
-  "bash '$WSL_SCRIPT' --to-windows --side wsl" \
+  "bash '$WSL_SCRIPT' --to-windows --side wsl >/dev/null && printf '%s\\n' '{\"continue\":true}'" \
   "bash '$WSL_SCRIPT' --cancel-pending --side wsl" \
   "Syncing Codex sessions from WSL into Windows" \
   "Cancelling pending WSL Codex session sync"
 
 install_hooks \
   "$WINDOWS_CODEX_HOME/hooks.json" \
-  "\"$WINDOWS_CODEX_HOME_WIN/hooks/sync-codex-sessions.cmd\" --to-wsl --side windows" \
+  "\"$WINDOWS_CODEX_HOME_WIN/hooks/sync-codex-sessions.cmd\" --to-wsl --side windows >NUL && echo {\"continue\":true}" \
   "\"$WINDOWS_CODEX_HOME_WIN/hooks/sync-codex-sessions.cmd\" --cancel-pending --side windows" \
   "Syncing Codex sessions from Windows into WSL" \
   "Cancelling pending Windows Codex session sync"

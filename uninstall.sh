@@ -42,11 +42,24 @@ data = json.loads(hooks_path.read_text(encoding="utf-8"))
 hooks = data.setdefault("hooks", {})
 
 def is_managed(hook):
+    if not isinstance(hook, dict):
+        return False
     return "sync-codex-sessions" in str(hook.get("command", ""))
 
 for event in list(hooks):
+    if not any(
+        is_managed(hook)
+        for group in hooks.get(event, [])
+        if isinstance(group, dict)
+        for hook in group.get("hooks", [])
+    ):
+        continue
+
     groups = []
     for group in hooks.get(event, []):
+        if not isinstance(group, dict):
+            groups.append(group)
+            continue
         kept = [hook for hook in group.get("hooks", []) if not is_managed(hook)]
         if kept:
             next_group = dict(group)
