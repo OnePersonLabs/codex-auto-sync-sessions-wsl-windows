@@ -13,7 +13,7 @@ log() {
 
 usage() {
   cat <<EOF
-Usage: sync-codex-sessions.sh [--to-windows|--to-wsl] [--side windows|wsl] [--cancel-pending|--run-pending] [--windows-home <path>] [--dry-run]
+Usage: sync-codex-sessions.sh [--to-windows|--to-wsl] [--side windows|wsl] [--cancel-pending|--run-pending] [--windows-home <path>] [--dry-run] [--hook] [--stop-hook] [--debug]
 EOF
 }
 
@@ -43,6 +43,9 @@ SIDE=""
 WINDOWS_HOME="${CODEX_HOME_WINDOWS:-/mnt/c/Users/zethj/.codex}"
 LOCAL_HOME="${CODEX_HOME:-$HOME/.codex}"
 DRY_RUN="0"
+HOOK_MODE="0"
+STOP_HOOK="0"
+DEBUG_OUTPUT="0"
 
 SYNC_LOCK_FILE="${CODEX_SESSION_SYNC_LOCK_FILE:-}"
 SYNC_LOCK_TIMEOUT_SECONDS="${CODEX_SESSION_SYNC_LOCK_TIMEOUT_SECONDS:-${CODEX_SYNC_LOCK_TIMEOUT_SECONDS:-2}}"
@@ -74,6 +77,16 @@ while [[ $# -gt 0 ]]; do
       ;;
     --dry-run)
       DRY_RUN="1"
+      ;;
+    --hook)
+      HOOK_MODE="1"
+      ;;
+    --stop-hook)
+      HOOK_MODE="1"
+      STOP_HOOK="1"
+      ;;
+    --debug)
+      DEBUG_OUTPUT="1"
       ;;
     -h|--help)
       usage
@@ -151,10 +164,24 @@ cleanup() {
 
 trap cleanup EXIT
 
+emit_status() {
+  if [[ "$HOOK_MODE" == "1" && "$DEBUG_OUTPUT" != "1" ]]; then
+    log "INFO" "$1"
+  else
+    echo "$1"
+  fi
+}
+
+emit_stop_continue() {
+  if [[ "$STOP_HOOK" == "1" ]]; then
+    printf '%s\n' '{"continue":true}'
+  fi
+}
+
 cancel_pending_sync() {
   rm -f "$SIDE_PENDING_FILE" 2>/dev/null || true
   log "INFO" "cancelled pending sync for side=$SIDE"
-  echo "pending sync cancelled: side=$SIDE"
+  emit_status "pending sync cancelled: side=$SIDE"
 }
 
 launch_pending_runner() {
@@ -408,7 +435,7 @@ run_pending_sync() {
     if [[ "$current_token" == "$expected_token" ]]; then
       reschedule_pending_sync
     fi
-    echo "pending sync backed off: side=$SIDE"
+    emit_status "pending sync backed off: side=$SIDE"
     exit 0
   fi
 
@@ -420,7 +447,7 @@ run_pending_sync() {
   rm -f "$SIDE_PENDING_FILE" 2>/dev/null || true
   run_result="$(run_sync_pass)"
   read -r copied skipped <<<"$run_result"
-  echo "pending sync completed: side=$SIDE mode=$MODE copied=$copied skipped=$skipped"
+  emit_status "pending sync completed: side=$SIDE mode=$MODE copied=$copied skipped=$skipped"
   log "INFO" "pending sync completed: side=$SIDE mode=$MODE copied=$copied skipped=$skipped"
 }
 
@@ -455,7 +482,8 @@ if ! acquire_sync_lock; then
   else
     log "WARN" "sync skipped: lock contention and pending sync could not be scheduled for side=$SIDE"
   fi
-  echo "sync skipped: lock contention (debounced ${SYNC_DEBOUNCE_SECONDS}s)"
+  emit_status "sync skipped: lock contention (debounced ${SYNC_DEBOUNCE_SECONDS}s)"
+  emit_stop_continue
   exit 0
 fi
 
@@ -463,6 +491,7 @@ rm -f "$SIDE_PENDING_FILE" 2>/dev/null || true
 run_result="$(run_sync_pass)"
 read -r copied skipped <<<"$run_result"
 
-echo "sync completed: side=$SIDE mode=$MODE copied=$copied skipped=$skipped"
+emit_status "sync completed: side=$SIDE mode=$MODE copied=$copied skipped=$skipped"
 echo "$(date -Iseconds) [sync-end] side=$SIDE mode=$MODE copied=$copied skipped=$skipped" >> "$LOG_FILE"
+emit_stop_continue
 exit 0

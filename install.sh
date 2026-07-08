@@ -127,15 +127,15 @@ PY
 
 install_hooks \
   "$WSL_CODEX_HOME/hooks.json" \
-  "bash '$WSL_SCRIPT' --to-windows --side wsl >/dev/null && printf '%s\\n' '{\"continue\":true}'" \
-  "bash '$WSL_SCRIPT' --cancel-pending --side wsl" \
+  "bash '$WSL_SCRIPT' --stop-hook --to-windows --side wsl" \
+  "bash '$WSL_SCRIPT' --hook --cancel-pending --side wsl" \
   "Syncing Codex sessions from WSL into Windows" \
   "Cancelling pending WSL Codex session sync"
 
 install_hooks \
   "$WINDOWS_CODEX_HOME/hooks.json" \
-  "\"$WINDOWS_CODEX_HOME_WIN/hooks/sync-codex-sessions.cmd\" --to-wsl --side windows >NUL && echo {\"continue\":true}" \
-  "\"$WINDOWS_CODEX_HOME_WIN/hooks/sync-codex-sessions.cmd\" --cancel-pending --side windows" \
+  "\"$WINDOWS_CODEX_HOME_WIN/hooks/sync-codex-sessions.cmd\" --stop-hook --to-wsl --side windows" \
+  "\"$WINDOWS_CODEX_HOME_WIN/hooks/sync-codex-sessions.cmd\" --hook --cancel-pending --side windows" \
   "Syncing Codex sessions from Windows into WSL" \
   "Cancelling pending Windows Codex session sync"
 
